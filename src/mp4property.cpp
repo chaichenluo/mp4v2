@@ -145,8 +145,8 @@ void MP4IntegerProperty::IncrementValue(int32_t increment, uint32_t index)
     SetValue(GetValue() + increment);
 }
 
-void MP4Integer8Property::Dump(uint8_t indent,
-                               bool dumpImplicits, uint32_t index)
+template<> void MP4Integer8Property::Dump(uint8_t indent,
+                                          bool dumpImplicits, uint32_t index)
 {
     if (m_implicit && !dumpImplicits) {
         return;
@@ -161,8 +161,8 @@ void MP4Integer8Property::Dump(uint8_t indent,
                  m_name, m_values[index], m_values[index]);
 }
 
-void MP4Integer16Property::Dump(uint8_t indent,
-                                bool dumpImplicits, uint32_t index)
+template<> void MP4Integer16Property::Dump(uint8_t indent,
+                                           bool dumpImplicits, uint32_t index)
 {
     if (m_implicit && !dumpImplicits) {
         return;
@@ -177,8 +177,8 @@ void MP4Integer16Property::Dump(uint8_t indent,
                  m_name, m_values[index], m_values[index]);
 }
 
-void MP4Integer24Property::Dump(uint8_t indent,
-                                bool dumpImplicits, uint32_t index)
+template<> void MP4Integer24Property::Dump(uint8_t indent,
+                                           bool dumpImplicits, uint32_t index)
 {
     if (m_implicit && !dumpImplicits) {
         return;
@@ -193,8 +193,8 @@ void MP4Integer24Property::Dump(uint8_t indent,
                  m_name, m_values[index], m_values[index]);
 }
 
-void MP4Integer32Property::Dump(uint8_t indent,
-                                bool dumpImplicits, uint32_t index)
+template<> void MP4Integer32Property::Dump(uint8_t indent,
+                                           bool dumpImplicits, uint32_t index)
 {
     if (m_implicit && !dumpImplicits) {
         return;
@@ -209,8 +209,8 @@ void MP4Integer32Property::Dump(uint8_t indent,
                  m_name, m_values[index], m_values[index]);
 }
 
-void MP4Integer64Property::Dump(uint8_t indent,
-                                bool dumpImplicits, uint32_t index)
+template<> void MP4Integer64Property::Dump(uint8_t indent,
+                                           bool dumpImplicits, uint32_t index)
 {
     if (m_implicit && !dumpImplicits) {
         return;
@@ -311,6 +311,42 @@ void MP4Float32Property::Dump(uint8_t indent,
                  m_name, m_values[index]);
 }
 
+// MP4Float64Property
+
+void MP4Float64Property::Read(MP4File& file, uint32_t index)
+{
+    if (m_implicit) {
+        return;
+    }
+
+    m_values[index] = file.ReadDouble();
+}
+
+void MP4Float64Property::Write(MP4File& file, uint32_t index)
+{
+    if (m_implicit) {
+        return;
+    }
+
+    file.WriteDouble(m_values[index]);
+}
+
+void MP4Float64Property::Dump(uint8_t indent,
+                              bool dumpImplicits, uint32_t index)
+{
+    if (m_implicit && !dumpImplicits) {
+        return;
+    }
+    if (index != 0)
+        log.dump(indent, MP4_LOG_VERBOSE1, "\"%s\": %s[%u] = %f",
+                 m_parentAtom.GetFile().GetFilename().c_str(),
+                 m_name, index, m_values[index]);
+    else
+        log.dump(indent, MP4_LOG_VERBOSE1, "\"%s\": %s = %f",
+                 m_parentAtom.GetFile().GetFilename().c_str(),
+                 m_name, m_values[index]);
+}
+
 // MP4StringProperty
 
 MP4StringProperty::MP4StringProperty(
@@ -355,7 +391,7 @@ void MP4StringProperty::SetValue(const char* value, uint32_t index)
     if (m_readOnly) {
         ostringstream msg;
         msg << "property " << m_name << "is read-only";
-        throw new PlatformException(msg.str().c_str(), EACCES, __FILE__, __LINE__, __FUNCTION__ );
+        throw new PLATFORM_EXCEPTION(msg.str().c_str(), EACCES);
     }
 
     MP4Free(m_values[index]);
@@ -391,8 +427,10 @@ void MP4StringProperty::Read( MP4File& file, uint32_t index )
         char*& value = m_values[i];
 
         // Generally a default atom setting, e.g. see atom_avc1.cpp, "JVT/AVC Coding"; we'll leak this string if
-        // we don't free.  Note that MP4Free checks for null.
-        MP4Free(value); 
+        // we don't free.  Note that this code checks for null before calling free and sets the pointer to null
+        // after freeing it, to prevent a double free in case an exception occurs before the value is reassigned.
+        MP4Free( value );
+        value = NULL;
 
         if( m_useCountedFormat ) {
             value = file.ReadCountedString( (m_useUnicode ? 2 : 1), m_useExpandedCount, m_fixedLength );
@@ -523,13 +561,13 @@ void MP4BytesProperty::SetValue(const uint8_t* pValue, uint32_t valueSize,
     if (m_readOnly) {
         ostringstream msg;
         msg << "property " << m_name << "is read-only";
-        throw new PlatformException(msg.str().c_str(), EACCES, __FILE__, __LINE__, __FUNCTION__ );
+        throw new PLATFORM_EXCEPTION(msg.str().c_str(), EACCES);
     }
     if (m_fixedValueSize) {
         if (valueSize > m_fixedValueSize) {
             ostringstream msg;
             msg << GetParentAtom().GetType() << "." << GetName() << " value size " << valueSize << " exceeds fixed value size " << m_fixedValueSize;
-            throw new Exception(msg.str().c_str(), __FILE__, __LINE__, __FUNCTION__ );
+            throw new EXCEPTION(msg.str().c_str());
         }
         if (m_values[index] == NULL) {
             m_values[index] = (uint8_t*)MP4Calloc(m_fixedValueSize);
@@ -554,8 +592,7 @@ void MP4BytesProperty::SetValue(const uint8_t* pValue, uint32_t valueSize,
 void MP4BytesProperty::SetValueSize(uint32_t valueSize, uint32_t index)
 {
     if (m_fixedValueSize) {
-        throw new Exception("can't change size of fixed sized property",
-                            __FILE__, __LINE__, __FUNCTION__ );
+        throw new EXCEPTION("can't change size of fixed sized property");
     }
     if (m_values[index] != NULL) {
         m_values[index] = (uint8_t*)MP4Realloc(m_values[index], valueSize);
@@ -650,9 +687,6 @@ void MP4BytesProperty::Dump(uint8_t indent,
         adjsize = 128;
         supressed = true;
     }
-
-    ostringstream oss;
-    ostringstream text;
 
     log.dump(indent, MP4_LOG_VERBOSE2, "\"%s\": %s = <%u bytes>",
              m_parentAtom.GetFile().GetFilename().c_str(),
@@ -896,7 +930,7 @@ bool MP4DescriptorProperty::FindProperty(const char *name,
         MP4Property** ppProperty, uint32_t* pIndex)
 {
     // we're unnamed, so just check contained properties
-    if (m_name == NULL || !strcmp(m_name, "")) {
+    if (m_name == NULL || strequal(m_name, "")) {
         return FindContainedProperty(name, ppProperty, pIndex);
     }
 
@@ -973,7 +1007,7 @@ void MP4DescriptorProperty::Read(MP4File& file, uint32_t index)
                 delete x;
                 break;
             }
-            throw x;
+            throw;
         }
 
         // check if tag is in desired range

@@ -1,26 +1,8 @@
 #include "src/impl.h"
 #include "libplatform/impl.h" /* for platform_win32_impl.h which declares Utf8ToFilename */
-#include <windows.h>
 
-namespace mp4v2 {
-    using namespace impl;
-}
-
-/**
- * Set this to 1 to compile in extra debugging
- */
-#define EXTRA_DEBUG 0
-
-/**
- * @def LOG_PRINTF
- *
- * call log.printf if EXTRA_DEBUG is defined to 1.  Do
- * nothing otherwise
- */
-#if EXTRA_DEBUG
-#define LOG_PRINTF(X) log.printf X
-#else
-#define LOG_PRINTF(X)
+#if _WIN32_WINNT < 0x0600
+#   include <io.h> // for _lseeki64 in pre Windows Vista code
 #endif
 
 namespace mp4v2 { namespace platform { namespace io {
@@ -32,17 +14,19 @@ class StandardFileProvider : public FileProvider
 public:
     StandardFileProvider();
 
-    bool open( std::string name, Mode mode );
+    bool open( const std::string& name, Mode mode );
     bool seek( Size pos );
-    bool read( void* buffer, Size size, Size& nin, Size maxChunkSize );
-    bool write( const void* buffer, Size size, Size& nout, Size maxChunkSize );
+    bool read( void* buffer, Size size, Size& nin );
+    bool write( const void* buffer, Size size, Size& nout );
+    bool truncate( Size size );
     bool close();
+    bool getSize( Size& nout );
 
 private:
-    HANDLE _handle;
+    FILE* _file;
 
     /**
-     * The UTF-8 encoded file name
+     * Argument for FileSystem::getFileSize()
      */
     std::string _name;
 };
@@ -50,7 +34,7 @@ private:
 ///////////////////////////////////////////////////////////////////////////////
 
 StandardFileProvider::StandardFileProvider()
-    : _handle( INVALID_HANDLE_VALUE )
+    : _file( NULL )
 {
 }
 
@@ -64,32 +48,24 @@ StandardFileProvider::StandardFileProvider()
  * @retval true error opening @p name
  */
 bool
-StandardFileProvider::open( std::string name, Mode mode )
+StandardFileProvider::open( const std::string& name, Mode mode )
 {
-    DWORD access = 0;
-    DWORD share  = 0;
-    DWORD crdisp = 0;
-    DWORD flags  = FILE_ATTRIBUTE_NORMAL;
+    _name = name;
 
+    const wchar_t *om;
     switch( mode ) {
         case MODE_UNDEFINED:
         case MODE_READ:
         default:
-            access |= GENERIC_READ;
-            share  |= FILE_SHARE_READ;
-            crdisp |= OPEN_EXISTING;
+            om = L"rbN";
             break;
 
         case MODE_MODIFY:
-            access |= GENERIC_READ | GENERIC_WRITE;
-            share  |= FILE_SHARE_READ;
-            crdisp |= OPEN_EXISTING;
+            om = L"r+bN";
             break;
 
         case MODE_CREATE:
-            access |= GENERIC_READ | GENERIC_WRITE;
-            share  |= FILE_SHARE_READ;
-            crdisp |= CREATE_ALWAYS;
+            om = L"w+bN";
             break;
     }
 
@@ -102,20 +78,10 @@ StandardFileProvider::open( std::string name, Mode mode )
     }
 
     ASSERT(LPCWSTR(filename));
-    _handle = CreateFileW( filename, access, share, NULL, crdisp, flags, NULL );
-    if (_handle == INVALID_HANDLE_VALUE)
-    {
-        log.errorf("%s: CreateFileW(%s) failed (%d)",__FUNCTION__,filename.utf8.c_str(),GetLastError());
-        return true;
-    }
 
-    /*
-    ** Make a copy of the name for future log messages, etc.
-    */
-    log.verbose2f("%s: CreateFileW(%s) succeeded",__FUNCTION__,filename.utf8.c_str());
+    _file = _wfopen( filename, om );
 
-    _name = filename.utf8;
-    return false;
+    return (_file == NULL);
 }
 
 /**
@@ -130,19 +96,14 @@ StandardFileProvider::open( std::string name, Mode mode )
 bool
 StandardFileProvider::seek( Size pos )
 {
-    LARGE_INTEGER n;
+#if _WIN32_WINNT >= 0x0600 // Windows Vista or later
+    return _fseeki64( _file, pos, SEEK_SET );
+#else
+    // cause a cache flush before using _fileno routines
+    rewind( _file );
 
-    ASSERT(_handle != INVALID_HANDLE_VALUE);
-
-    n.QuadPart = pos;
-    if (!SetFilePointerEx( _handle, n, NULL, FILE_BEGIN ))
-    {
-        log.errorf("%s: SetFilePointerEx(%s,%" PRId64 ") failed (%d)",__FUNCTION__,_name.c_str(),
-                                pos,GetLastError());
-        return true;
-    }
-
-    return false;
+    return _lseeki64( _fileno( _file ), pos, SEEK_SET ) == -1;
+#endif
 }
 
 /**
@@ -159,25 +120,12 @@ StandardFileProvider::seek( Size pos )
  * @retval true error reading from the file
  */
 bool
-StandardFileProvider::read( void* buffer, Size size, Size& nin, Size maxChunkSize )
+StandardFileProvider::read( void* buffer, Size size, Size& nin )
 {
-    DWORD nread = 0;
-
-    ASSERT(_handle != INVALID_HANDLE_VALUE);
-
-    // ReadFile takes a DWORD for number of bytes to read so
-    // make sure we're not asking for more than fits.
-    // MAXDWORD from WinNT.h.
-    ASSERT(size <= MAXDWORD);
-    if( ReadFile( _handle, buffer, (DWORD)(size & MAXDWORD), &nread, NULL ) == 0 )
-    {
-        log.errorf("%s: ReadFile(%s,%d) failed (%d)",__FUNCTION__,_name.c_str(),
-                   (DWORD)(size & MAXDWORD),GetLastError());
+    Size count = fread( buffer, 1, size, _file );
+    if( ferror(_file) )
         return true;
-    }
-    LOG_PRINTF((MP4_LOG_VERBOSE3,"%s: ReadFile(%s,%d) succeeded: read %d byte(s)",__FUNCTION__,
-               _name.c_str(),(DWORD)(size & MAXDWORD),nread));
-    nin = nread;
+    nin = count;
     return false;
 }
 
@@ -195,26 +143,50 @@ StandardFileProvider::read( void* buffer, Size size, Size& nin, Size maxChunkSiz
  * @retval true error writing to the file
  */
 bool
-StandardFileProvider::write( const void* buffer, Size size, Size& nout, Size maxChunkSize )
+StandardFileProvider::write( const void* buffer, Size size, Size& nout )
 {
-    DWORD nwrote = 0;
+    Size count = fwrite( buffer, 1, size, _file );
+    if( ferror(_file) )
+        return true;
+    nout = count;
+    return false;
+}
 
-    ASSERT(_handle != INVALID_HANDLE_VALUE);
+/**
+ * Truncate file size
+ *
+ * @param size the number of bytes to truncate the file to
+ *
+ * @retval false successfully truncated the file
+ * @retval true error truncating the file
+ */
+bool
+StandardFileProvider::truncate( Size size )
+{
+    // close the file prior to truncating it
+    fclose( _file );
 
-    // ReadFile takes a DWORD for number of bytes to read so
-    // make sure we're not asking for more than fits.
-    // MAXDWORD from WinNT.h.
-    ASSERT(size <= MAXDWORD);
-    if( WriteFile( _handle, buffer, (DWORD)(size & MAXDWORD), &nwrote, NULL ) == 0 )
-    {
-        log.errorf("%s: WriteFile(%s,%d) failed (%d)",__FUNCTION__,_name.c_str(),
-                   (DWORD)(size & MAXDWORD),GetLastError());
+    // truncate the file using Windows API functions
+    win32::Utf8ToFilename filename(_name);
+    HANDLE handle = CreateFileW( filename, GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if ( handle == INVALID_HANDLE_VALUE )
+        return true;
+
+    LARGE_INTEGER end;
+    end.QuadPart = size;
+    if ( !SetFilePointerEx( handle, end, NULL, FILE_BEGIN ) || !SetEndOfFile( handle ) ) {
+        CloseHandle( handle );
         return true;
     }
-    log.verbose2f("%s: WriteFile(%s,%d) succeeded: wrote %d byte(s)",__FUNCTION__,
-                  _name.c_str(),(DWORD)(size & MAXDWORD),nwrote);
-    nout = nwrote;
-    return false;
+
+    CloseHandle( handle );
+
+    // reopen the file and seek to the new end
+    _file = _wfopen( filename, L"r+bN" );
+    if ( _file == NULL )
+        return true;
+
+    return seek( size );
 }
 
 /**
@@ -226,23 +198,27 @@ StandardFileProvider::write( const void* buffer, Size size, Size& nout, Size max
 bool
 StandardFileProvider::close()
 {
-    BOOL retval;
+    return fclose(_file);
+}
 
-    retval = CloseHandle( _handle );
-    if (!retval)
-    {
-        log.errorf("%s: CloseHandle(%s) failed (%d)",__FUNCTION__,
-                   _name.c_str(),GetLastError());
-    }
+/**
+ * Get the size of a the file in bytes
+ *
+ * @param nout populated with the size of the file in
+ * bytes if the function succeeds
+ *
+ * @retval false successfully got the file size
+ * @retval true error getting the file size
+ */
+bool
+StandardFileProvider::getSize( Size& nout )
+{
+    bool retval;
 
-    // Whether we succeeded or not, clear the handle and
-    // forget the name
-    _handle = INVALID_HANDLE_VALUE;
-    _name.clear();
+    // getFileSize will log if it fails
+    retval = FileSystem::getFileSize( _name, nout );
 
-    // CloseHandle return 0/false to indicate failure, but
-    // we return 0/false to indicate success, so negate.
-    return !retval;
+    return retval;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

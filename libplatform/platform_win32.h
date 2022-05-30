@@ -3,6 +3,12 @@
 
 ///////////////////////////////////////////////////////////////////////////////
 
+#ifdef __MINGW32__
+#   include "libplatform/config.h"
+#endif
+
+///////////////////////////////////////////////////////////////////////////////
+
 // mingw needs this to enable some newer 64-bit functions
 #ifdef __MINGW32__
 #   undef  __MSVCRT_VERSION__
@@ -59,15 +65,17 @@ namespace mp4v2 { namespace platform {
 ///////////////////////////////////////////////////////////////////////////////
 
 // some macros for constant expressions
-#define INT8_C(x)    x
-#define INT16_C(x)   x
-#define INT32_C(x)   x ## L
-#define INT64_C(x)   x ## LL
+#ifndef INT8_C
+#   define INT8_C(x)    x
+#   define INT16_C(x)   x
+#   define INT32_C(x)   x ## L
+#   define INT64_C(x)   x ## LL
 
-#define UINT8_C(x)   x
-#define UINT16_C(x)  x
-#define UINT32_C(x)  x ## UL
-#define UINT64_C(x)  x ## ULL
+#   define UINT8_C(x)   x
+#   define UINT16_C(x)  x
+#   define UINT32_C(x)  x ## UL
+#   define UINT64_C(x)  x ## ULL
+#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -81,9 +89,13 @@ namespace mp4v2 { namespace platform {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-#define snprintf(s,n,...)  _snprintf(s,n,__VA_ARGS__)
-#define strcasecmp(s1,s2)  _stricmp(s1,s2)
-#define strdup(s)          _strdup(s)
+#ifndef strcasecmp
+#   define strcasecmp(s1,s2) _stricmp(s1,s2)
+#endif
+
+#ifndef strncasecmp
+#   define strncasecmp(s1,s2,l) _strnicmp(s1,s2,l)
+#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 
